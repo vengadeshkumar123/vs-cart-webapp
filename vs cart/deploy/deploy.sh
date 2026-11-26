@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Deploy two ECR images to the Ubuntu App EC2.
-# Usage: deploy.sh <frontend-image:tag> <backend-image:tag> [aws-region]
 set -euo pipefail
 FRONTEND_IMAGE="${1:?Usage: deploy.sh <frontend-image:tag> <backend-image:tag> [region]}"
 BACKEND_IMAGE="${2:?Missing backend image URI}"
