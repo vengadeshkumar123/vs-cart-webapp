@@ -1,0 +1,93 @@
+// Builds and publishes two independent images, then deploys both to the App EC2.
+// Jenkins requirements: Docker, AWS CLI, ECR push IAM permissions, and SSH credential ec2-ssh-key.
+pipeline {
+  agent any
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    timeout(time: 40, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '15'))
+  }
+  parameters {
+    booleanParam(name: 'DEPLOY', defaultValue: true, description: 'Deploy both images to App EC2 after pushing to ECR')
+  }
+  environment {
+    AWS_REGION = 'ap-south-1'
+    AWS_ACCOUNT_ID = '113056210430'
+    ECR_REGISTRY = '113056210430.dkr.ecr.ap-south-1.amazonaws.com'
+    FRONTEND_REPO = 'vscart-frontend'
+    BACKEND_REPO = 'vscart-backend'
+    EC2_USER = 'ubuntu'
+    EC2_HOST = '10.0.27.118'
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        script {
+          def sha = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+          env.IMAGE_TAG = "${env.BUILD_NUMBER}-${sha}"
+          env.FRONTEND_URI = "${env.ECR_REGISTRY}/${env.FRONTEND_REPO}"
+          env.BACKEND_URI = "${env.ECR_REGISTRY}/${env.BACKEND_REPO}"
+          echo "Image tag: ${env.IMAGE_TAG}"
+        }
+      }
+    }
+    stage('Build Frontend Image') {
+      steps {
+        sh '''
+          docker build --platform linux/amd64 -f client/Dockerfile \\
+            -t ${FRONTEND_URI}:${IMAGE_TAG} -t ${FRONTEND_URI}:latest .
+        '''
+      }
+    }
+    stage('Build Backend Image') {
+      steps {
+        sh '''
+          docker build --platform linux/amd64 -f server/Dockerfile \\
+            -t ${BACKEND_URI}:${IMAGE_TAG} -t ${BACKEND_URI}:latest .
+        '''
+      }
+    }
+    stage('Image Sanity Checks') {
+      steps {
+        sh '''
+          docker run --rm --entrypoint node ${BACKEND_URI}:${IMAGE_TAG} --check server.js
+          docker run --rm --entrypoint nginx ${FRONTEND_URI}:${IMAGE_TAG} -t
+        '''
+      }
+    }
+    stage('Push Both Images to ECR') {
+      steps {
+        sh '''
+          aws ecr get-login-password --region ${AWS_REGION} | \\
+            docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          docker push ${FRONTEND_URI}:${IMAGE_TAG}
+          docker push ${FRONTEND_URI}:latest
+          docker push ${BACKEND_URI}:${IMAGE_TAG}
+          docker push ${BACKEND_URI}:latest
+        '''
+      }
+    }
+    stage('Deploy Both Containers to App EC2') {
+      when { expression { return params.DEPLOY } }
+      steps {
+        sshagent(credentials: ['ec2-ssh-key']) {
+          sh '''
+            scp -o StrictHostKeyChecking=accept-new deploy/deploy.sh ${EC2_USER}@${EC2_HOST}:/tmp/vscart-deploy.sh
+            ssh -o StrictHostKeyChecking=accept-new ${EC2_USER}@${EC2_HOST} \\
+              "bash /tmp/vscart-deploy.sh ${FRONTEND_URI}:${IMAGE_TAG} ${BACKEND_URI}:${IMAGE_TAG} ${AWS_REGION}"
+          '''
+        }
+      }
+    }
+  }
+  post {
+    success { echo "Frontend and backend images deployed with tag ${env.IMAGE_TAG}" }
+    failure { echo 'Pipeline failed. Review the stage logs; deployment script attempts to roll back both containers.' }
+    always {
+      sh 'docker rmi ${FRONTEND_URI}:${IMAGE_TAG} ${FRONTEND_URI}:latest ${BACKEND_URI}:${IMAGE_TAG} ${BACKEND_URI}:latest || true'
+      sh 'docker image prune -f || true'
+    }
+  }
+}
