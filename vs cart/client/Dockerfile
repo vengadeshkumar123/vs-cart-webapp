@@ -4,7 +4,7 @@ WORKDIR /app/client
 COPY client/package*.json ./
 RUN npm install --no-audit --no-fund
 COPY client/ ./
-# The browser calls the API through the same ALB hostname.
+
 ENV VITE_API_URL=/api
 RUN npm run build
 
